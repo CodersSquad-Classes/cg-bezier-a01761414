@@ -6,6 +6,7 @@ import argparse
 import itertools
 from collections import Counter
 from collections import deque
+import math
 
 import cv2 as cv
 import numpy as np
@@ -15,6 +16,10 @@ from utils import CvFpsCalc
 from model import KeyPointClassifier
 from model import PointHistoryClassifier
 
+class pt:
+    def __init__(self):
+        self.x = 0
+        self.y = 0
 
 def get_args():
     parser = argparse.ArgumentParser()
@@ -37,6 +42,7 @@ def get_args():
 
     return args
 
+bezier_image = None
 
 def main():
     # 引数解析 #################################################################
@@ -45,6 +51,8 @@ def main():
     cap_device = args.device
     cap_width = args.width
     cap_height = args.height
+
+    bezier_image = np.zeros((cap_height,cap_width, 3), np.uint8)
 
     use_static_image_mode = args.use_static_image_mode
     min_detection_confidence = args.min_detection_confidence
@@ -61,7 +69,7 @@ def main():
     mp_hands = mp.solutions.hands
     hands = mp_hands.Hands(
         static_image_mode=use_static_image_mode,
-        max_num_hands=1,
+        max_num_hands=2,
         min_detection_confidence=min_detection_confidence,
         min_tracking_confidence=min_tracking_confidence,
     )
@@ -161,6 +169,7 @@ def main():
                 # 描画
                 debug_image = draw_bounding_rect(use_brect, debug_image, brect)
                 debug_image = draw_landmarks(debug_image, landmark_list)
+
                 debug_image = draw_info_text(
                     debug_image,
                     brect,
@@ -168,11 +177,26 @@ def main():
                     keypoint_classifier_labels[hand_sign_id],
                     point_history_classifier_labels[most_common_fg_id[0][0]],
                 )
+
+                get_bezier_ctrl_points(
+                    debug_image,
+                    brect,
+                    handedness,
+                    keypoint_classifier_labels[hand_sign_id],
+                    point_history_classifier_labels[most_common_fg_id[0][0]],
+                )
+
         else:
             point_history.append([0, 0])
 
         debug_image = draw_point_history(debug_image, point_history)
         debug_image = draw_info(debug_image, fps, mode, number)
+
+        for point in bezier_ctrl_points:
+            cv.circle(debug_image, point, 10, (0,255,0), -1)
+
+        if (len(bezier_ctrl_points)) == 4:
+            debug_image = draw_bezier_curve(debug_image, bezier_ctrl_points, n_bez_curve_pts=100)
 
         # 画面反映 #############################################################
         cv.imshow('Hand Gesture Recognition', debug_image)
@@ -490,6 +514,75 @@ def draw_bounding_rect(use_brect, image, brect):
                      (0, 0, 0), 1)
 
     return image
+
+bezier_ctrl_points = []
+open_hand = True
+
+# Asumiendo que euclidian_distance es una función definida en tu código
+def euclidian_distance(p1, p2):
+    return np.sqrt((p1[0] - p2[0]) ** 2 + (p1[1] - p2[1]) ** 2)
+
+# Asegúrate de que bezier_ctrl_points está definido globalmente
+bezier_ctrl_points = []
+
+def get_bezier_ctrl_points(image, brect, handedness, hand_sign_text, finger_gesture_text):
+    global open_hand, bezier_ctrl_points
+
+    # Mid Point
+    x_m_point = (brect[0] + brect[2]) / 2
+    y_m_point = (brect[1] + brect[3]) / 2
+    mid_point = (int(x_m_point), int(y_m_point))
+
+    if "Open" in hand_sign_text:
+        open_hand = True
+    if "Close" in hand_sign_text:
+        if open_hand:
+            if len(bezier_ctrl_points) < 4:
+                for point in bezier_ctrl_points:
+                    dist = euclidian_distance(mid_point, point)
+                    if dist <= 50:
+                        return
+                bezier_ctrl_points.append(mid_point)
+
+            open_hand = False
+
+    print(bezier_ctrl_points)
+
+def binomial_coeffs(n):
+    coeffs = [0] * (n + 1)
+    for k in range(n + 1):
+        coeffs[k] = 1
+        for j in range(n, k, -1):
+            coeffs[k] *= j
+        for j in range(n - k, 1, -1):
+            coeffs[k] //= j
+    return coeffs
+
+def compute_bezier_point(u, point, n_ctrl_pts, ctrl_pts, coeffs):
+    n = n_ctrl_pts - 1
+    point.x = point.y = 0.0
+
+    for k in range(n_ctrl_pts):
+        bez_blend_fcn = coeffs[k] * (u ** k) * ((1 - u) ** (n - k))
+        point.x += ctrl_pts[k][0] * bez_blend_fcn
+        point.y += ctrl_pts[k][1] * bez_blend_fcn
+
+    return point
+
+def draw_bezier_curve(debug_image, ctrl_points, n_bez_curve_pts):
+    bez_curve_pt = pt()
+    C = binomial_coeffs(len(ctrl_points) - 1)
+    
+    for k in range(n_bez_curve_pts + 1):
+        u = k / n_bez_curve_pts
+        compute_bezier_point(u, bez_curve_pt, len(ctrl_points), ctrl_points, C)
+
+        x, y = int(bez_curve_pt.x), int(bez_curve_pt.y)
+        print(f"Drawing point: ({x}, {y})")  # Debug print
+        cv.circle(debug_image, (x, y), radius=2, color=(0, 0, 255), thickness=4)
+
+    return debug_image
+
 
 
 def draw_info_text(image, brect, handedness, hand_sign_text,
